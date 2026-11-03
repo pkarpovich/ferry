@@ -21,3 +21,10 @@ jobs:
       - run: mise exec -- cargo fmt --check
       - run: mise exec -- cargo clippy --all-targets --all-features --locked -- -D warnings
       - run: mise exec -- cargo test
+
+  containers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+      - run: mise exec -- cargo test --locked --test containers -- --ignored

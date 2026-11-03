@@ -20,6 +20,7 @@ A call bus between two hosts over one ssh stream. Rust edition 2024, a library p
 - `src/client.rs` - `ferry call`, `ls`, `reload`.
 - `src/peer.rs` - the bridge sshd runs on the far host.
 - `tests/` - `cli.rs`, `client.rs`, and `e2e.rs` with two daemons and a fake ssh script from `tests/support/mod.rs`.
+- `tests/containers.rs` with `tests/containers/` - two containers linked like a real deployment: the far host keeps `autossh -R` to the dialer with a key limited to `command="/usr/bin/false"`, and the dialer runs `ssh far ferry peer` back through it. Handlers `file-read`, `file-write` and `service-proxy` cover the two real uses, a file read and written on request and an HTTP service with a token behind a listen port. All tests there are `#[ignore]` because they need Docker.
 
 ## Gate
 
@@ -32,6 +33,8 @@ mise exec -- cargo test
 ```
 
 Also `grep -rnE '\.unwrap\(\)' src/ tests/` and `grep -rnE 'matches!|#\[allow' src/ tests/` must find nothing.
+
+With Docker running, `mise exec -- cargo test --test containers -- --ignored` runs the container tests. Run them after any change to the link, the session, the runner, the daemon or the bridge. CI runs them on ubuntu only, since the macOS runners have no Docker.
 
 ## Style
 
