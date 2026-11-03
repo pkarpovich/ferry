@@ -1,7 +1,7 @@
 //! The daemon: the lock, the local socket, the loopback ports and the current link.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
@@ -233,7 +233,12 @@ fn take_lock(paths: &Paths) -> Result<Option<File>> {
         .open(&paths.lock)
         .with_context(|| format!("cannot open {}", paths.lock.display()))?;
     match flock(&file, FlockOperation::NonBlockingLockExclusive) {
-        Ok(()) => Ok(Some(file)),
+        Ok(()) => {
+            file.set_len(0)
+                .and_then(|()| (&file).write_all(std::process::id().to_string().as_bytes()))
+                .with_context(|| format!("cannot write {}", paths.lock.display()))?;
+            Ok(Some(file))
+        }
         Err(Errno::WOULDBLOCK) => Ok(None),
         Err(err) => Err(err).with_context(|| format!("cannot lock {}", paths.lock.display())),
     }

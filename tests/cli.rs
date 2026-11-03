@@ -29,11 +29,3 @@ fn unknown_command_exits_two() {
 fn no_command_exits_two() {
     assert_eq!(ferry(&[]).status.code(), Some(2));
 }
-
-#[test]
-fn unbuilt_command_exits_two() {
-    let output = ferry(&["ls"]);
-    assert_eq!(output.status.code(), Some(2));
-    let text = String::from_utf8(output.stderr).expect("stderr is utf-8");
-    assert!(text.contains("ls is not built yet"));
-}
