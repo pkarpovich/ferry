@@ -32,7 +32,7 @@ All keys are optional, and an unknown key is an error.
 
 | Key | Meaning |
 |---|---|
-| `handlers` | Folder with this host's handlers. A leading `~/` expands to `$HOME`. |
+| `handlers` | Folder with this host's handlers. A leading `~/` expands to `$HOME`, and a relative path is taken from `$HOME`. |
 | `connect` | ssh destination. Present: this host is the dialer. |
 | `remote_ferry` | Path of `ferry` on the far host, default `ferry`. Needed when sshd's PATH does not contain it. |
 | `[[listen]]` | Each has `port` (1-65535) and `handler` (a name on the other side). |

@@ -89,10 +89,8 @@ impl Config {
 }
 
 fn expand_home(folder: &str, home: &Path) -> PathBuf {
-    let Some(rest) = folder.strip_prefix("~/") else {
-        return PathBuf::from(folder);
-    };
-    home.join(rest)
+    let folder = folder.strip_prefix("~/").unwrap_or(folder);
+    home.join(folder)
 }
 
 #[cfg(test)]
@@ -194,9 +192,13 @@ handler = "other"
     }
 
     #[test]
-    fn tilde_expands_only_with_a_slash() {
+    fn handlers_path_is_absolute_after_expansion() {
         assert_eq!(expand_home("~/h", &home()), PathBuf::from("/home/test/h"));
         assert_eq!(expand_home("/abs/h", &home()), PathBuf::from("/abs/h"));
-        assert_eq!(expand_home("~h", &home()), PathBuf::from("~h"));
+        assert_eq!(
+            expand_home("handlers", &home()),
+            PathBuf::from("/home/test/handlers")
+        );
+        assert_eq!(expand_home("~h", &home()), PathBuf::from("/home/test/~h"));
     }
 }

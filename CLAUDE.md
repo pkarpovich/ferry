@@ -57,3 +57,4 @@ Also `grep -rnE '\.unwrap\(\)' src/ tests/` and `grep -rnE 'matches!|#\[allow' s
 - The daemon holds an exclusive lock on `ferry.lock`. A second daemon exits 0 at once.
 - `ferry call` and `ferry peer` end with `std::process::exit`, never by returning from `main`, because a pending stdin read cannot be cancelled.
 - The cancel sequence is one routine: SIGTERM to the group, SIGKILL after 5 s if any member lives, close the daemon's pipe ends after 10 s.
+- The 5 s exit grace counts only idle pipe time. A pump blocked in `send` on a full event queue is back-pressure from a slow link, and starting the cancel sequence then would drop output while still reporting the handler's exit code.

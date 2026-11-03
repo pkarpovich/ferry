@@ -9,7 +9,7 @@ use std::time::Duration;
 use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, sleep_until};
 
@@ -119,9 +119,21 @@ fn exit_code(status: ExitStatus) -> i32 {
     }
 }
 
-async fn pump<R: AsyncRead + Unpin>(mut pipe: R, stream: Stream, tx: mpsc::Sender<Event>) {
+#[derive(Debug, Clone, Copy)]
+enum PumpState {
+    Waiting(Instant),
+    Sending,
+}
+
+async fn pump<R: AsyncRead + Unpin>(
+    mut pipe: R,
+    stream: Stream,
+    tx: mpsc::Sender<Event>,
+    state: watch::Sender<PumpState>,
+) {
     let mut buf = vec![0; MAX_CHUNK];
     loop {
+        state.send_replace(PumpState::Waiting(Instant::now()));
         let Ok(read) = pipe.read(&mut buf).await else {
             return;
         };
@@ -129,10 +141,37 @@ async fn pump<R: AsyncRead + Unpin>(mut pipe: R, stream: Stream, tx: mpsc::Sende
             return;
         }
         let data = buf[..read].to_vec();
+        state.send_replace(PumpState::Sending);
         if tx.send(Event::Chunk { stream, data }).await.is_err() {
             return;
         }
     }
+}
+
+struct Pipe {
+    done: bool,
+    watching: bool,
+    state: watch::Receiver<PumpState>,
+}
+
+fn idle_deadline(exited: Instant, pipes: [&Pipe; 2]) -> Option<Instant> {
+    let mut deadline = exited + EXIT_GRACE;
+    for pipe in pipes {
+        if pipe.done {
+            continue;
+        }
+        let state = *pipe.state.borrow();
+        match state {
+            PumpState::Sending => return None,
+            PumpState::Waiting(since) => {
+                let candidate = since.max(exited) + EXIT_GRACE;
+                if candidate > deadline {
+                    deadline = candidate;
+                }
+            }
+        }
+    }
+    Some(deadline)
 }
 
 #[cfg(target_os = "linux")]
@@ -217,12 +256,24 @@ async fn supervise(
     tx: mpsc::Sender<Event>,
     cancel: Arc<Notify>,
 ) {
-    let mut out_task: JoinHandle<()> = tokio::spawn(pump(stdout, Stream::Stdout, tx.clone()));
-    let mut err_task: JoinHandle<()> = tokio::spawn(pump(stderr, Stream::Stderr, tx.clone()));
-    let mut out_done = false;
-    let mut err_done = false;
+    let (out_state, out_watch) = watch::channel(PumpState::Waiting(Instant::now()));
+    let (err_state, err_watch) = watch::channel(PumpState::Waiting(Instant::now()));
+    let mut out_task: JoinHandle<()> =
+        tokio::spawn(pump(stdout, Stream::Stdout, tx.clone(), out_state));
+    let mut err_task: JoinHandle<()> =
+        tokio::spawn(pump(stderr, Stream::Stderr, tx.clone(), err_state));
+    let mut out = Pipe {
+        done: false,
+        watching: true,
+        state: out_watch,
+    };
+    let mut err = Pipe {
+        done: false,
+        watching: true,
+        state: err_watch,
+    };
     let mut code = None;
-    let mut grace = None;
+    let mut exited = None;
     let mut sequence: Option<Sequence> = None;
 
     loop {
@@ -232,33 +283,46 @@ async fn supervise(
             }) => group_lives(pgid),
             Some(Sequence { kill_at: None, .. }) | None => false,
         };
-        let finished = code.is_some() && out_done && err_done;
+        let finished = code.is_some() && out.done && err.done;
         if finished && !killing {
             break;
         }
         let kill_at = sequence.as_ref().and_then(|seq| seq.kill_at);
         let close_at = sequence.as_ref().and_then(|seq| seq.close_at);
+        let grace = exited.and_then(|at| idle_deadline(at, [&out, &err]));
+        let watch_out = exited.is_some() && out.watching && !out.done;
+        let watch_err = exited.is_some() && err.watching && !err.done;
         tokio::select! {
             status = child.wait(), if code.is_none() => {
                 code = Some(status.map_or(UNKNOWN_STATUS_CODE, exit_code));
                 if sequence.is_none() {
-                    grace = Some(Instant::now() + EXIT_GRACE);
+                    exited = Some(Instant::now());
                 }
             }
-            _ = &mut out_task, if !out_done => {
-                out_done = true;
+            _ = &mut out_task, if !out.done => {
+                out.done = true;
                 let _ = tx.send(Event::Eof(Stream::Stdout)).await;
             }
-            _ = &mut err_task, if !err_done => {
-                err_done = true;
+            _ = &mut err_task, if !err.done => {
+                err.done = true;
                 let _ = tx.send(Event::Eof(Stream::Stderr)).await;
             }
+            changed = out.state.changed(), if watch_out => {
+                if changed.is_err() {
+                    out.watching = false;
+                }
+            }
+            changed = err.state.changed(), if watch_err => {
+                if changed.is_err() {
+                    err.watching = false;
+                }
+            }
             () = cancel.notified(), if sequence.is_none() => {
-                grace = None;
+                exited = None;
                 sequence = Some(begin_cancel(pgid));
             }
             () = sleep_until(grace.unwrap_or_else(Instant::now)), if grace.is_some() => {
-                grace = None;
+                exited = None;
                 sequence = Some(begin_cancel(pgid));
             }
             () = sleep_until(kill_at.unwrap_or_else(Instant::now)), if kill_at.is_some() => {
@@ -276,12 +340,12 @@ async fn supervise(
         }
     }
 
-    if !out_done {
+    if !out.done {
         out_task.abort();
         let _ = out_task.await;
         let _ = tx.send(Event::Eof(Stream::Stdout)).await;
     }
-    if !err_done {
+    if !err.done {
         err_task.abort();
         let _ = err_task.await;
         let _ = tx.send(Event::Eof(Stream::Stderr)).await;
@@ -291,6 +355,7 @@ async fn supervise(
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
@@ -524,6 +589,37 @@ mod tests {
             let state = stat.rsplit_once(')').map(|(_, rest)| rest.trim_start());
             assert!(state.is_some_and(|rest| rest.starts_with('Z')), "{stat}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_slow_receiver_after_exit_loses_no_output() {
+        let dir = TempDir::new().expect("tempdir");
+        let script = "#!/bin/sh\n\
+            for i in 1 2 3 4 5 6 7 8 9 10; do echo line-$i; sleep 0.05; done\n\
+            exit 0\n";
+        let mut running = start(&dir, script, &[]);
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let mut stdout = Vec::new();
+        for _ in 0..2 {
+            let event = running.events.recv().await.expect("a line is queued");
+            let Event::Chunk {
+                stream: Stream::Stdout,
+                data,
+            } = event
+            else {
+                panic!("the first events are stdout lines, got {event:?}");
+            };
+            stdout.extend(data);
+        }
+        tokio::time::sleep(Duration::from_millis(16500)).await;
+        let done = collect(&mut running).await;
+        stdout.extend(done.stdout);
+        let mut expected = String::new();
+        for i in 1..=10 {
+            writeln!(expected, "line-{i}").expect("writing to a String cannot fail");
+        }
+        assert_eq!(String::from_utf8(stdout).expect("utf-8"), expected);
+        assert_eq!(done.code, 0);
     }
 
     #[tokio::test]
