@@ -3,5 +3,6 @@
 pub mod cli;
 pub mod config;
 pub mod frame;
+pub mod handlers;
 pub mod name;
 pub mod paths;
