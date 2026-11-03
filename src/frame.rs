@@ -7,7 +7,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 pub const MAX_LINE: usize = 128 * 1024;
 pub const MAX_CHUNK: usize = 64 * 1024;
 
-const KNOWN_KINDS: [&str; 9] = [
+pub const KNOWN_KINDS: [&str; 9] = [
     "hello", "handlers", "ping", "open", "chunk", "eof", "exit", "error", "cancel",
 ];
 
