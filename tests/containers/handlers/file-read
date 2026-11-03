@@ -1,0 +1,12 @@
+#!/bin/sh
+# @ferry.name file-read
+# @ferry.desc print a file from ~/docs
+set -eu
+root="$HOME/docs"
+[ "$#" -eq 1 ] || { echo "usage: file-read <path>" >&2; exit 2; }
+path=$(realpath -m -- "$root/$1")
+case "$path" in
+"$root"/*) ;;
+*) echo "file-read: $1 is outside docs" >&2; exit 2 ;;
+esac
+exec cat -- "$path"

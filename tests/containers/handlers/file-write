@@ -1,0 +1,16 @@
+#!/bin/sh
+# @ferry.name file-write
+# @ferry.desc replace a file in ~/docs with stdin if it still has the sha256 it was read with
+set -eu
+root="$HOME/docs"
+[ "$#" -eq 2 ] || { echo "usage: file-write <path> <sha256>" >&2; exit 2; }
+path=$(realpath -m -- "$root/$1")
+case "$path" in
+"$root"/*) ;;
+*) echo "file-write: $1 is outside docs" >&2; exit 2 ;;
+esac
+current=$(sha256sum -- "$path" | cut -d' ' -f1)
+[ "$current" = "$2" ] || { echo "file-write: $1 changed since it was read" >&2; exit 1; }
+tmp=$(mktemp "$path.XXXXXX")
+cat >"$tmp"
+mv -- "$tmp" "$path"
