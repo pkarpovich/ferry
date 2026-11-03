@@ -58,6 +58,7 @@ struct State {
     handlers: Vec<Handler>,
     skipped: Vec<Skipped>,
     current: Option<Current>,
+    running: usize,
     generation: u64,
     last_failure: Option<String>,
 }
@@ -118,6 +119,7 @@ impl Inner {
             let session = Session::new(role, state.handlers.clone(), input, output);
             let handle = session.handle();
             state.generation += 1;
+            state.running += 1;
             let generation = state.generation;
             let old = state.current.replace(Current {
                 handle: handle.clone(),
@@ -146,6 +148,7 @@ impl Inner {
                 state.current = None;
                 state.last_failure = Some(end.reason.to_string());
             }
+            state.running -= 1;
         }
         self.changed.notify_waiters();
         end
@@ -156,7 +159,7 @@ impl Inner {
             let notified = self.changed.notified();
             let mut notified = pin!(notified);
             notified.as_mut().enable();
-            if locked(&self.state).current.is_none() {
+            if locked(&self.state).running == 0 {
                 return;
             }
             notified.await;
@@ -272,6 +275,7 @@ impl Daemon {
                 handlers,
                 skipped,
                 current: None,
+                running: 0,
                 generation: 0,
                 last_failure: None,
             }),

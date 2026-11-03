@@ -620,6 +620,36 @@ async fn feed_stdin(
     }
 }
 
+async fn start_handler(
+    id: CallId,
+    name: &str,
+    argv: &[String],
+    handler: Option<Handler>,
+    slot: &CallSlot,
+) -> Option<runner::Running> {
+    let Some(handler) = handler else {
+        slot.send(Frame::Error {
+            id,
+            code: NO_HANDLER_CODE,
+            message: format!("no handler {name} on the other side"),
+        })
+        .await;
+        return None;
+    };
+    match runner::spawn(&handler, argv) {
+        Ok(running) => Some(running),
+        Err(err) => {
+            slot.send(Frame::Error {
+                id,
+                code: CANNOT_START_CODE,
+                message: format!("cannot start {name}: {err}"),
+            })
+            .await;
+            None
+        }
+    }
+}
+
 async fn serve_inbound(call: InboundCall) {
     let InboundCall {
         id,
@@ -631,26 +661,8 @@ async fn serve_inbound(call: InboundCall) {
         mut ctl,
         unread,
     } = call;
-    let Some(handler) = handler else {
-        slot.send(Frame::Error {
-            id,
-            code: NO_HANDLER_CODE,
-            message: format!("no handler {name} on the other side"),
-        })
-        .await;
+    let Some(mut running) = start_handler(id, &name, &argv, handler, &slot).await else {
         return;
-    };
-    let mut running = match runner::spawn(&handler, &argv) {
-        Ok(running) => running,
-        Err(err) => {
-            slot.send(Frame::Error {
-                id,
-                code: CANNOT_START_CODE,
-                message: format!("cannot start {name}: {err}"),
-            })
-            .await;
-            return;
-        }
     };
     let feeder = running
         .stdin
@@ -659,26 +671,41 @@ async fn serve_inbound(call: InboundCall) {
 
     let mut silent = false;
     let mut ctl_open = true;
+    let mut exiting = false;
+    let mut pending: Option<Frame> = None;
     loop {
         tokio::select! {
-            event = running.events.recv() => {
+            permit = slot.reserve(), if pending.is_some() => {
+                let frame = pending.take();
+                if let (Ok(permit), Some(frame)) = (permit, frame) {
+                    permit.send(frame);
+                }
+                if exiting {
+                    break;
+                }
+            }
+            event = running.events.recv(), if pending.is_none() || (silent && !exiting) => {
                 let Some(event) = event else { break };
                 match event {
                     Event::Chunk { stream, data } => {
                         if !silent {
-                            slot.send(Frame::Chunk { id, stream, data }).await;
+                            pending = Some(Frame::Chunk { id, stream, data });
                         }
                     }
                     Event::Eof(stream) => {
                         if !silent {
-                            slot.send(Frame::Eof { id, stream }).await;
+                            pending = Some(Frame::Eof { id, stream });
                         }
                     }
                     Event::Exit(code) => {
-                        if !silent {
-                            slot.send(Frame::Exit { id, code }).await;
+                        exiting = true;
+                        if silent {
+                            if pending.is_none() {
+                                break;
+                            }
+                        } else {
+                            pending = Some(Frame::Exit { id, code });
                         }
-                        break;
                     }
                 }
             }
@@ -686,19 +713,27 @@ async fn serve_inbound(call: InboundCall) {
                 Some(Ctl::Overflow) => {
                     if !silent {
                         let message = "unread limit".to_owned();
-                        slot.send(Frame::Error { id, code: FAILED_CODE, message }).await;
+                        pending = Some(Frame::Error { id, code: FAILED_CODE, message });
                     }
                     silent = true;
                     running.cancel();
                 }
                 Some(Ctl::Cancel) => {
                     silent = true;
+                    pending = None;
                     running.cancel();
+                    if exiting {
+                        break;
+                    }
                 }
                 None => {
                     ctl_open = false;
                     silent = true;
+                    pending = None;
                     running.cancel();
+                    if exiting {
+                        break;
+                    }
                 }
             },
         }

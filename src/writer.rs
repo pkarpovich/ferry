@@ -43,6 +43,15 @@ impl CallSlot {
     pub async fn send(&self, frame: Frame) -> bool {
         self.tx.send(frame).await.is_ok()
     }
+
+    /// Waits until the slot is free and holds it. Dropping the future loses nothing.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the writer is gone.
+    pub async fn reserve(&self) -> Result<mpsc::Permit<'_, Frame>, mpsc::error::SendError<()>> {
+        self.tx.reserve().await
+    }
 }
 
 /// Starts the writer task on `out`.

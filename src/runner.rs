@@ -11,7 +11,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, sleep_until};
+use tokio::time::{Instant, sleep, sleep_until};
 
 use crate::frame::{MAX_CHUNK, Stream};
 use crate::handlers::Handler;
@@ -23,6 +23,7 @@ const KILL_AFTER: Duration = Duration::from_secs(5);
 const CLOSE_AFTER: Duration = Duration::from_secs(10);
 const KILLED_CODE: i32 = 137;
 const UNKNOWN_STATUS_CODE: i32 = 255;
+const WATCH_EVERY: Duration = Duration::from_millis(50);
 const EVENT_QUEUE: usize = 8;
 
 /// The handler file could not be started. Its code is [`SPAWN_FAILED_CODE`].
@@ -134,6 +135,66 @@ async fn pump<R: AsyncRead + Unpin>(mut pipe: R, stream: Stream, tx: mpsc::Sende
     }
 }
 
+#[cfg(target_os = "linux")]
+fn group_lives(pgid: Pid) -> bool {
+    if test_kill_process_group(pgid).is_err() {
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return true;
+    };
+    let want = pgid.as_raw_nonzero().get();
+    for entry in entries.flatten() {
+        let Ok(stat) = std::fs::read(entry.path().join("stat")) else {
+            continue;
+        };
+        let stat = String::from_utf8_lossy(&stat);
+        let Some((_, rest)) = stat.rsplit_once(')') else {
+            continue;
+        };
+        let mut fields = rest.split_whitespace();
+        let (Some(state), Some(_ppid), Some(group)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if group.parse::<i32>() != Ok(want) {
+            continue;
+        }
+        if state != "Z" || has_live_thread(&entry.path()) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn has_live_thread(process: &std::path::Path) -> bool {
+    let Ok(tasks) = std::fs::read_dir(process.join("task")) else {
+        return false;
+    };
+    for task in tasks.flatten() {
+        let Ok(stat) = std::fs::read(task.path().join("stat")) else {
+            continue;
+        };
+        let stat = String::from_utf8_lossy(&stat);
+        let Some((_, rest)) = stat.rsplit_once(')') else {
+            continue;
+        };
+        let Some(state) = rest.split_whitespace().next() else {
+            continue;
+        };
+        if state != "Z" {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(not(target_os = "linux"))]
+fn group_lives(pgid: Pid) -> bool {
+    test_kill_process_group(pgid).is_ok()
+}
+
 struct Sequence {
     kill_at: Option<Instant>,
     close_at: Option<Instant>,
@@ -164,7 +225,17 @@ async fn supervise(
     let mut grace = None;
     let mut sequence: Option<Sequence> = None;
 
-    while code.is_none() || !out_done || !err_done {
+    loop {
+        let killing = match &sequence {
+            Some(Sequence {
+                kill_at: Some(_), ..
+            }) => group_lives(pgid),
+            Some(Sequence { kill_at: None, .. }) | None => false,
+        };
+        let finished = code.is_some() && out_done && err_done;
+        if finished && !killing {
+            break;
+        }
         let kill_at = sequence.as_ref().and_then(|seq| seq.kill_at);
         let close_at = sequence.as_ref().and_then(|seq| seq.close_at);
         tokio::select! {
@@ -194,13 +265,14 @@ async fn supervise(
                 if let Some(seq) = sequence.as_mut() {
                     seq.kill_at = None;
                 }
-                if test_kill_process_group(pgid).is_ok() {
+                if group_lives(pgid) {
                     let _ = kill_process_group(pgid, Signal::KILL);
                 }
             }
             () = sleep_until(close_at.unwrap_or_else(Instant::now)), if close_at.is_some() => {
                 break;
             }
+            () = sleep(WATCH_EVERY), if finished => {}
         }
     }
 
@@ -417,6 +489,41 @@ mod tests {
             done.elapsed
         );
         assert!(done.elapsed < Duration::from_secs(8), "{:?}", done.elapsed);
+    }
+
+    #[tokio::test]
+    async fn a_lingering_child_that_closed_its_pipes_on_sigterm_is_still_killed() {
+        let dir = TempDir::new().expect("tempdir");
+        let pid_file = dir.path().join("child.pid");
+        let script = format!(
+            "#!/bin/sh\n(trap 'exec >&- 2>&-' TERM; while :; do sleep 1; done) &\necho $! > {}\nexit 0\n",
+            pid_file.display()
+        );
+        let mut running = start(&dir, &script, &[]);
+        let done = collect(&mut running).await;
+        assert_eq!(done.code, 0);
+        assert!(
+            done.elapsed >= Duration::from_millis(9800),
+            "{:?}",
+            done.elapsed
+        );
+        assert!(done.elapsed < Duration::from_secs(13), "{:?}", done.elapsed);
+        let pid = fs::read_to_string(&pid_file).expect("child wrote its pid");
+        let stat_path = format!("/proc/{}/stat", pid.trim());
+        let mut stat = fs::read_to_string(&stat_path);
+        for _ in 0..40 {
+            let Ok(text) = &stat else { break };
+            let state = text.rsplit_once(')').map(|(_, rest)| rest.trim_start());
+            if state.is_some_and(|rest| rest.starts_with('Z')) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            stat = fs::read_to_string(&stat_path);
+        }
+        if let Ok(stat) = stat {
+            let state = stat.rsplit_once(')').map(|(_, rest)| rest.trim_start());
+            assert!(state.is_some_and(|rest| rest.starts_with('Z')), "{stat}");
+        }
     }
 
     #[tokio::test]
