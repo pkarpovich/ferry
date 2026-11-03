@@ -1,0 +1,38 @@
+[package]
+name = "ferry"
+version = "0.1.0"
+edition = "2024"
+description = "A call bus between two hosts over one ssh stream"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.23"
+rustix = { version = "1", features = ["process"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "macros", "net", "process", "io-util", "io-std", "time", "sync", "signal"] }
+toml = "1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = 10 }
+pedantic = { level = "warn", priority = 3 }
+unwrap_used = "deny"
+wildcard_imports = "deny"
+needless_for_each = "deny"
+undocumented_unsafe_blocks = "deny"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
