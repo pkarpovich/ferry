@@ -1135,6 +1135,37 @@ mod tests {
         assert!(begun.elapsed() >= SILENCE);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_ping_goes_out_every_ten_seconds() {
+        let (near, distant) = duplex(64 * 1024);
+        let (read, write) = split(near);
+        let session = Session::new(Role::Dialer, Vec::new(), read, write);
+        let running = tokio::spawn(session.run());
+        let (distant_read, mut distant_write) = split(distant);
+        distant_write
+            .write_all(&hello(1))
+            .await
+            .expect("hello is written");
+        let mut input = BufReader::new(distant_read);
+        let first = read_frame(&mut input).await.expect("hello is read");
+        let Some(Frame::Hello { .. }) = first else {
+            panic!("expected hello, got {first:?}");
+        };
+        let begun = Instant::now();
+        for beat in 1..=2_u32 {
+            let next = read_frame(&mut input).await.expect("ping is read");
+            let Some(Frame::Ping) = next else {
+                panic!("expected ping, got {next:?}");
+            };
+            assert_eq!(begun.elapsed(), PING_EVERY * beat);
+            distant_write
+                .write_all(&encode(&Frame::Ping))
+                .await
+                .expect("ping is written back");
+        }
+        running.abort();
+    }
+
     #[tokio::test]
     async fn a_different_version_closes_the_link() {
         let (near, mut distant) = duplex(64 * 1024);
