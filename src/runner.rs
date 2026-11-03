@@ -166,12 +166,16 @@ struct Pipe {
 }
 
 impl Pipe {
-    fn mark_exit(&mut self) {
+    fn mark_exit(&mut self, exited: Instant) {
         let PumpState {
             blocked,
-            sending_since: _,
+            sending_since,
         } = *self.state.borrow();
-        self.blocked_at_exit = blocked;
+        let before_exit = match sending_since {
+            Some(since) => exited.saturating_duration_since(since),
+            None => Duration::ZERO,
+        };
+        self.blocked_at_exit = blocked + before_exit;
     }
 }
 
@@ -320,9 +324,10 @@ async fn supervise(
             status = child.wait(), if code.is_none() => {
                 code = Some(status.map_or(UNKNOWN_STATUS_CODE, exit_code));
                 if sequence.is_none() {
-                    exited = Some(Instant::now());
-                    out.mark_exit();
-                    err.mark_exit();
+                    let now = Instant::now();
+                    exited = Some(now);
+                    out.mark_exit(now);
+                    err.mark_exit(now);
                 }
             }
             _ = &mut out_task, if !out.done => {
@@ -463,6 +468,25 @@ mod tests {
         }
     }
 
+    async fn read_until_ready(running: &mut Running) {
+        let mut stdout = Vec::new();
+        while !stdout.ends_with(b"ready\n") {
+            let event = running
+                .events
+                .recv()
+                .await
+                .expect("the handler reports ready");
+            let Event::Chunk {
+                stream: Stream::Stdout,
+                data,
+            } = event
+            else {
+                panic!("expected stdout before ready, got {event:?}");
+            };
+            stdout.extend(data);
+        }
+    }
+
     #[tokio::test]
     async fn argv_arrives_without_shell_splitting() {
         let dir = TempDir::new().expect("tempdir");
@@ -539,9 +563,9 @@ mod tests {
     #[tokio::test]
     async fn a_handler_that_traps_sigterm_is_killed_after_five_seconds() {
         let dir = TempDir::new().expect("tempdir");
-        let script = "#!/bin/sh\ntrap '' TERM\nwhile :; do sleep 1; done\n";
+        let script = "#!/bin/sh\ntrap '' TERM\necho ready\nwhile :; do sleep 1; done\n";
         let mut running = start(&dir, script, &[]);
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        read_until_ready(&mut running).await;
         let begun = StdInstant::now();
         running.cancel();
         let done = collect(&mut running).await;
@@ -554,9 +578,12 @@ mod tests {
     #[tokio::test]
     async fn a_child_that_traps_sigterm_is_killed_after_five_seconds_though_the_handler_died() {
         let dir = TempDir::new().expect("tempdir");
-        let script = "#!/bin/sh\n(trap '' TERM; while :; do sleep 1; done) &\nexit 0\n";
+        let script = "#!/bin/sh\n\
+            (trap '' TERM; while kill -0 $$ 2>/dev/null; do sleep 0.05; done; \
+            echo ready; while :; do sleep 1; done) &\n\
+            exit 0\n";
         let mut running = start(&dir, script, &[]);
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        read_until_ready(&mut running).await;
         let begun = StdInstant::now();
         running.cancel();
         let done = collect(&mut running).await;
@@ -615,6 +642,41 @@ mod tests {
             let state = stat.rsplit_once(')').map(|(_, rest)| rest.trim_start());
             assert!(state.is_some_and(|rest| rest.starts_with('Z')), "{stat}");
         }
+    }
+
+    #[test]
+    fn a_send_in_flight_at_exit_extends_the_grace_only_by_its_part_after_exit() {
+        let exited = Instant::now();
+        let since = exited
+            .checked_sub(Duration::from_secs(20))
+            .expect("the clock is past 20 s");
+        let (state, watch) = watch::channel(PumpState {
+            blocked: Duration::from_secs(3),
+            sending_since: Some(since),
+        });
+        let mut busy = Pipe {
+            done: false,
+            watching: true,
+            blocked_at_exit: Duration::ZERO,
+            state: watch,
+        };
+        busy.mark_exit(exited);
+        let (_idle_state, idle_watch) = watch::channel(PumpState::default());
+        let idle = Pipe {
+            done: false,
+            watching: true,
+            blocked_at_exit: Duration::ZERO,
+            state: idle_watch,
+        };
+        assert_eq!(grace_deadline(exited, [&busy, &idle]), None);
+        state.send_replace(PumpState {
+            blocked: Duration::from_secs(24),
+            sending_since: None,
+        });
+        assert_eq!(
+            grace_deadline(exited, [&busy, &idle]),
+            Some(exited + EXIT_GRACE + Duration::from_secs(1))
+        );
     }
 
     #[tokio::test]
