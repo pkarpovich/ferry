@@ -13,10 +13,9 @@ use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until};
 
-use crate::frame::Stream;
+use crate::frame::{MAX_CHUNK, Stream};
 use crate::handlers::Handler;
 
-pub const CHUNK_BYTES: usize = 64 * 1024;
 pub const SPAWN_FAILED_CODE: i32 = 126;
 
 const EXIT_GRACE: Duration = Duration::from_secs(5);
@@ -48,34 +47,17 @@ pub enum Event {
     Exit(i32),
 }
 
-/// Starts the cancel sequence of a run. Cloning is cheap and cancelling twice is harmless.
-#[derive(Debug, Clone)]
-pub struct Canceller {
-    notify: Arc<Notify>,
-}
-
-impl Canceller {
-    pub fn cancel(&self) {
-        self.notify.notify_one();
-    }
-}
-
 /// A handler process. `events` ends with one `Exit` after the `Eof` of stdout and stderr.
 #[derive(Debug)]
 pub struct Running {
     pub stdin: Option<ChildStdin>,
     pub events: mpsc::Receiver<Event>,
-    canceller: Canceller,
+    cancel: Arc<Notify>,
 }
 
 impl Running {
-    #[must_use]
-    pub fn canceller(&self) -> Canceller {
-        self.canceller.clone()
-    }
-
     pub fn cancel(&self) {
-        self.canceller.cancel();
+        self.cancel.notify_one();
     }
 }
 
@@ -111,16 +93,20 @@ pub fn spawn(handler: &Handler, argv: &[String]) -> Result<Running, SpawnError> 
     let stderr = child.stderr.take().expect("stderr is piped");
 
     let (tx, events) = mpsc::channel(EVENT_QUEUE);
-    let notify = Arc::new(Notify::new());
-    let canceller = Canceller {
-        notify: Arc::clone(&notify),
-    };
-    tokio::spawn(supervise(child, pgid, stdout, stderr, tx, notify));
+    let cancel = Arc::new(Notify::new());
+    tokio::spawn(supervise(
+        child,
+        pgid,
+        stdout,
+        stderr,
+        tx,
+        Arc::clone(&cancel),
+    ));
 
     Ok(Running {
         stdin,
         events,
-        canceller,
+        cancel,
     })
 }
 
@@ -133,7 +119,7 @@ fn exit_code(status: ExitStatus) -> i32 {
 }
 
 async fn pump<R: AsyncRead + Unpin>(mut pipe: R, stream: Stream, tx: mpsc::Sender<Event>) {
-    let mut buf = vec![0; CHUNK_BYTES];
+    let mut buf = vec![0; MAX_CHUNK];
     loop {
         let Ok(read) = pipe.read(&mut buf).await else {
             return;

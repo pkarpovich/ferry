@@ -56,7 +56,9 @@ handler = "service-proxy"
 
 Run `ferry daemon` on the dialer under launchd or another supervisor.
 On the far host nothing needs to be started: `ferry peer`, which sshd runs, starts the daemon when it finds none.
-A change to `config.toml` needs a daemon restart, and `ferry reload` re-reads the handler folder only.
+A change to `config.toml` needs a daemon restart, and `ferry reload` re-reads the handler folder only and sends the new list to the other side.
+
+A host keeps its state in `~/.local/state/ferry/` (mode 0700): `ferry.sock`, `ferry.lock` and `ferry.log`. A daemon started by `ferry peer` writes its stdout and stderr to `ferry.log`. Only one daemon runs per host; a second `ferry daemon` exits 0 at once. `$HOME` must be short enough that the socket path fits in 103 bytes.
 
 The dialer runs `ssh -T -o BatchMode=yes -o ConnectTimeout=5 <connect> <remote_ferry> peer`.
 Set `FERRY_SSH` to use another program than `ssh`.
@@ -108,7 +110,7 @@ A handler has no terminal and must not wait for a person.
 The daemon starts it with no shell, in `$HOME`, in its own process group, so a cancel reaches the programs it starts too.
 A handler that starts a long-lived background program redirects that program's stdio.
 
-`ferry ls` shows this host's handlers, the other side's handlers, and the files that were skipped with the reason.
+`ferry ls` shows the link state (up with the peer's version, or down with the last reason), this host's handlers, the other side's handlers, and the files that were skipped with the reason. `ferry ls --json` prints the same as JSON for scripts.
 
 ## Calling
 

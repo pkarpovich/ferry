@@ -18,6 +18,7 @@ use crate::frame::{
     read_frame,
 };
 use crate::handlers::Handler;
+use crate::name::HandlerName;
 use crate::runner::{self, Event};
 use crate::writer::{self, CallSlot, LinkSender};
 
@@ -103,7 +104,6 @@ enum StdinMsg {
 enum Ctl {
     Cancel,
     Overflow,
-    LinkLost,
 }
 
 struct Inbound {
@@ -125,6 +125,7 @@ struct Shared {
     remote: Mutex<Vec<HandlerInfo>>,
     up: watch::Sender<bool>,
     established: AtomicBool,
+    hello_sent: AtomicBool,
     outbound: Mutex<HashMap<CallId, Outbound>>,
     inbound: Mutex<HashMap<CallId, Inbound>>,
     drained: Notify,
@@ -136,7 +137,7 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().expect("session state lock is not poisoned")
 }
 
-fn infos(handlers: &[Handler]) -> Vec<HandlerInfo> {
+pub(crate) fn infos(handlers: &[Handler]) -> Vec<HandlerInfo> {
     let mut list = Vec::new();
     for Handler {
         name,
@@ -177,6 +178,7 @@ impl Session {
             remote: Mutex::new(Vec::new()),
             up,
             established: AtomicBool::new(false),
+            hello_sent: AtomicBool::new(false),
             outbound: Mutex::new(HashMap::new()),
             inbound: Mutex::new(HashMap::new()),
             drained: Notify::new(),
@@ -209,12 +211,16 @@ impl Session {
         for kind in KNOWN_KINDS {
             kinds.push(kind.to_owned());
         }
-        let hello = Frame::Hello {
-            version: VERSION,
-            kinds,
-            handlers: infos(&locked(&shared.local)),
-        };
-        shared.link.send_link(hello);
+        {
+            let local = locked(&shared.local);
+            let hello = Frame::Hello {
+                version: VERSION,
+                kinds,
+                handlers: infos(&local),
+            };
+            shared.link.send_link(hello);
+            shared.hello_sent.store(true, Ordering::Relaxed);
+        }
 
         let mut input = BufReader::new(input);
         let reason = {
@@ -274,8 +280,9 @@ impl SessionHandle {
     /// Replaces this host's handlers and tells the other side when the link is up.
     pub fn set_handlers(&self, handlers: Vec<Handler>) {
         let list = infos(&handlers);
-        *locked(&self.shared.local) = handlers;
-        if self.is_up() {
+        let mut local = locked(&self.shared.local);
+        *local = handlers;
+        if self.shared.hello_sent.load(Ordering::Relaxed) {
             self.shared
                 .link
                 .send_link(Frame::Handlers { handlers: list });
@@ -291,6 +298,9 @@ impl SessionHandle {
     pub async fn open(&self, name: &str, argv: Vec<String>) -> Result<OutCall, CallFailure> {
         if !self.is_up() {
             return Err(CallFailure::failed("link not up"));
+        }
+        if HandlerName::parse(name).is_err() {
+            return Err(CallFailure::failed("invalid handler name"));
         }
         let id = CallId(self.shared.next_id.fetch_add(2, Ordering::Relaxed));
         let frame = Frame::Open {
@@ -681,7 +691,7 @@ async fn serve_inbound(call: InboundCall) {
                     silent = true;
                     running.cancel();
                 }
-                Some(Ctl::Cancel | Ctl::LinkLost) => {
+                Some(Ctl::Cancel) => {
                     silent = true;
                     running.cancel();
                 }
@@ -705,7 +715,7 @@ fn lose(shared: &Shared) {
         let _ = events.send(CallEvent::Error(CallFailure::failed("link lost")));
     }
     for entry in locked(&shared.inbound).values() {
-        let _ = entry.ctl.send(Ctl::LinkLost);
+        let _ = entry.ctl.send(Ctl::Cancel);
     }
 }
 
@@ -1084,6 +1094,17 @@ mod tests {
         let mut call = pair.dialer.open("echo", Vec::new()).await.expect("opens");
         let done = finish(&mut call).await;
         assert_eq!(done.stdout, b"ok\n");
+    }
+
+    #[tokio::test]
+    async fn an_invalid_handler_name_fails_locally_and_the_link_stays_up() {
+        let dir = TempDir::new().expect("tempdir");
+        let pair = link(Vec::new(), vec![handler(&dir, "echo", "echo ok")]).await;
+        let Err(failure) = pair.dialer.open(&"x".repeat(127 * 1024), Vec::new()).await else {
+            panic!("an invalid name must fail");
+        };
+        assert_eq!(failure, CallFailure::failed("invalid handler name"));
+        assert!(pair.dialer.is_up());
     }
 
     #[tokio::test]

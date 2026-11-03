@@ -116,7 +116,7 @@ jobs:
             end
 
             test do
-              assert_match "ferry call", shell_output("#{bin}/ferry help")
+              assert_match "usage: ferry", shell_output("#{bin}/ferry help")
             end
           end
           RUBY

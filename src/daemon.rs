@@ -181,18 +181,7 @@ impl Inner {
 
     fn ls(&self) -> LsReply {
         let state = locked(&self.state);
-        let mut local = Vec::new();
-        for Handler {
-            name,
-            desc,
-            path: _,
-        } in &state.handlers
-        {
-            local.push(crate::frame::HandlerInfo {
-                name: name.to_string(),
-                desc: desc.clone(),
-            });
-        }
+        let local = crate::session::infos(&state.handlers);
         let up = match &state.current {
             Some(Current { handle, .. }) if handle.is_up() => Some(handle.clone()),
             Some(_) | None => None,
@@ -269,10 +258,10 @@ impl Daemon {
     pub async fn start(home: &Path, options: Options) -> Result<Option<Self>> {
         let paths = Paths::new(home)?;
         paths.create_state_dir()?;
-        let config = Config::load(home)?;
         let Some(lock) = take_lock(&paths)? else {
             return Ok(None);
         };
+        let config = Config::load(home)?;
         let Scan { handlers, skipped } = scan_folder(&config);
         let listener = bind_socket(&paths)?;
         let (closing, _) = watch::channel(false);
@@ -741,6 +730,20 @@ mod tests {
         let second = Daemon::start(home.path(), options())
             .await
             .expect("second start is not an error");
+        assert!(second.is_none());
+        first.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_second_daemon_exits_zero_even_when_the_config_is_broken() {
+        let home = temp_home();
+        let first = start(home.path()).await;
+        fs::create_dir_all(home.path().join(".config/ferry")).expect("config dir");
+        fs::write(home.path().join(".config/ferry/config.toml"), "bogus = 1\n")
+            .expect("write config");
+        let second = Daemon::start(home.path(), options())
+            .await
+            .expect("a held lock wins over a bad config");
         assert!(second.is_none());
         first.shutdown().await;
     }
