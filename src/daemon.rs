@@ -579,20 +579,13 @@ async fn serve_listen(inner: Arc<Inner>, stream: TcpStream, handler: HandlerName
 async fn feed_socket(mut read: tokio::net::tcp::OwnedReadHalf, input: crate::session::CallInput) {
     let mut buffer = vec![0u8; MAX_CHUNK];
     loop {
-        match read.read(&mut buffer).await {
-            Ok(0) => {
-                input.close_stdin().await;
-                return;
-            }
-            Ok(count) => {
-                if !input.send_stdin(&buffer[..count]).await {
-                    return;
-                }
-            }
-            Err(_) => {
-                input.cancel().await;
-                return;
-            }
+        let count = read.read(&mut buffer).await.unwrap_or(0);
+        if count == 0 {
+            input.cancel().await;
+            return;
+        }
+        if !input.send_stdin(&buffer[..count]).await {
+            return;
         }
     }
 }
@@ -839,25 +832,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_tcp_client_that_half_closes_after_its_request_gets_the_answer() {
+    async fn a_tcp_client_that_leaves_cancels_a_silent_handler() {
         let (near, far) = (temp_home(), temp_home());
         let port = free_port();
-        write_config(near.path(), &listen_config(port, "cat"));
-        cat_handler(far.path());
+        write_config(near.path(), &listen_config(port, "silent"));
         write_config(far.path(), "handlers = \"~/handlers\"\n");
+        let pid_file = far.path().join("pid");
+        let body = format!(
+            "#!/bin/sh\n# @ferry.name silent\necho $$ > {}\nexec sleep 300\n",
+            pid_file.display()
+        );
+        write_handler(far.path(), "silent", &body);
+        let (a, b) = (start(near.path()).await, start(far.path()).await);
+        linked(&a, &b).await;
+        let mut client = TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("connects");
+        client.write_all(b"request").await.expect("request sent");
+        let pid = read_pid(pid_file).await;
+        drop(client);
+        until("the handler to stop", || gone(pid)).await;
+        a.shutdown().await;
+        b.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_tcp_client_that_answers_and_stays_gets_the_whole_reply() {
+        let (near, far) = (temp_home(), temp_home());
+        let port = free_port();
+        write_config(near.path(), &listen_config(port, "reply"));
+        write_config(far.path(), "handlers = \"~/handlers\"\n");
+        write_handler(
+            far.path(),
+            "reply",
+            "#!/bin/sh\n# @ferry.name reply\nhead -c 4 > /dev/null\nprintf pong\n",
+        );
         let (a, b) = (start(near.path()).await, start(far.path()).await);
         linked(&a, &b).await;
         let mut client = TcpStream::connect(("127.0.0.1", port))
             .await
             .expect("connects");
         client.write_all(b"ping").await.expect("request sent");
-        client.shutdown().await.expect("half close");
         let mut answer = Vec::new();
         timeout(WAIT, client.read_to_end(&mut answer))
             .await
             .expect("answered in time")
             .expect("read ends");
-        assert_eq!(answer, b"ping");
+        assert_eq!(answer, b"pong");
         a.shutdown().await;
         b.shutdown().await;
     }
@@ -912,11 +933,11 @@ mod tests {
             .expect("read ends");
         assert_eq!(read, 0);
         client.write_all(b"late").await.expect("can still send");
-        client.shutdown().await.expect("half close");
         until("the handler to read", || {
             fs::read_to_string(&out).is_ok_and(|text| text == "late")
         })
         .await;
+        drop(client);
         a.shutdown().await;
         b.shutdown().await;
     }

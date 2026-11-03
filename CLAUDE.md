@@ -60,4 +60,5 @@ With Docker running, `mise exec -- cargo test --test containers -- --ignored` ru
 - The daemon holds an exclusive lock on `ferry.lock`. A second daemon exits 0 at once.
 - `ferry call` and `ferry peer` end with `std::process::exit`, never by returning from `main`, because a pending stdin read cannot be cancelled.
 - The cancel sequence is one routine: SIGTERM to the group, SIGKILL after 5 s if any member lives, close the daemon's pipe ends after 10 s.
+- A listen-port client that closes its connection, or whose read fails, cancels the call. Half-closed clients are not supported: sending only `eof stdin` on EOF let handlers waiting on a silent upstream outlive their clients until all 32 call slots were taken.
 - The 5 s exit grace counts all time after the exit except the time a pump spends blocked in `send` on a full event queue. That wait is back-pressure from a slow link, and counting it would drop output while still reporting the handler's exit code. Resetting the grace on every chunk instead would let a descendant that keeps writing hold the call forever.

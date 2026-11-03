@@ -127,7 +127,7 @@ Ctrl+C stops the handler on the other side.
 
 A `[[listen]]` entry binds `127.0.0.1:<port>`, never another address.
 Every accepted connection becomes one call to the named handler on the other side with no argv, with the socket's bytes as the handler's stdin and stdout, the way inetd hands a socket to a program.
-A client that half-closes after its request still gets the answer.
+When the client closes the connection, the call is cancelled and the handler stopped, the way a reverse proxy drops an upstream request whose client left. A client that half-closes its side after the request is treated as gone too and gets no answer.
 This is how an HTTP client that only talks to loopback reaches a service behind the other host: the handler forwards the bytes, and ferry itself knows nothing about HTTP.
 On any error the daemon closes the TCP connection.
 

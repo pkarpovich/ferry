@@ -1,7 +1,7 @@
 mod support;
 
 use std::io::{Read, Write};
-use std::net::{Shutdown, TcpStream};
+use std::net::TcpStream;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -53,10 +53,9 @@ fn listen_port_hands_the_socket_to_a_handler_on_the_other_side() {
         .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("timeout");
     stream.write_all(b"ping over tcp").expect("request");
-    stream.shutdown(Shutdown::Write).expect("half close");
-    let mut answer = String::new();
-    stream.read_to_string(&mut answer).expect("answer");
-    assert_eq!(answer, "ping over tcp");
+    let mut answer = [0u8; 13];
+    stream.read_exact(&mut answer).expect("answer");
+    assert_eq!(&answer, b"ping over tcp");
 }
 
 #[test]
