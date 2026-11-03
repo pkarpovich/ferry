@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, ErrorKind};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::name::HandlerName;
 
@@ -23,7 +23,7 @@ pub struct Handler {
     pub path: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Skipped {
     pub file: String,
     pub reason: String,

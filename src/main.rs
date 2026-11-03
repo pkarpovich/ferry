@@ -14,7 +14,14 @@ async fn main() -> ExitCode {
             print!("{USAGE}");
             ExitCode::SUCCESS
         }
-        Command::Daemon | Command::Peer | Command::Call | Command::Ls | Command::Reload => {
+        Command::Daemon => match ferry::daemon::run().await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("ferry: {err:#}");
+                ExitCode::from(1)
+            }
+        },
+        Command::Peer | Command::Call | Command::Ls | Command::Reload => {
             eprintln!("ferry: {} is not built yet", command.word());
             ExitCode::from(2)
         }

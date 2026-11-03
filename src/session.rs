@@ -128,6 +128,7 @@ struct Shared {
     outbound: Mutex<HashMap<CallId, Outbound>>,
     inbound: Mutex<HashMap<CallId, Inbound>>,
     drained: Notify,
+    stop: Notify,
     link: LinkSender,
 }
 
@@ -179,6 +180,7 @@ impl Session {
             outbound: Mutex::new(HashMap::new()),
             inbound: Mutex::new(HashMap::new()),
             drained: Notify::new(),
+            stop: Notify::new(),
             link,
         });
         Self {
@@ -221,6 +223,7 @@ impl Session {
             loop {
                 tokio::select! {
                     reason = &mut reading => break reason,
+                    () = shared.stop.notified() => break SessionError::Closed,
                     _ = ping.tick() => {
                         shared.link.send_link(Frame::Ping);
                     }
@@ -251,6 +254,11 @@ impl SessionHandle {
     #[must_use]
     pub fn is_up(&self) -> bool {
         *self.shared.up.borrow()
+    }
+
+    /// Ends the link as lost. `run` returns after every call has ended.
+    pub fn close(&self) {
+        self.shared.stop.notify_one();
     }
 
     #[must_use]

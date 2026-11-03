@@ -2,8 +2,11 @@
 
 pub mod cli;
 pub mod config;
+pub mod daemon;
+pub mod dial;
 pub mod frame;
 pub mod handlers;
+pub mod local;
 pub mod name;
 pub mod paths;
 pub mod runner;
