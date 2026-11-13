@@ -115,6 +115,14 @@ jobs:
               bin.install "ferry"
             end
 
+            service do
+              run macos: [opt_bin/"ferry", "daemon"]
+              keep_alive true
+              environment_variables PATH: std_service_path_env
+              log_path var/"log/ferry.log"
+              error_log_path var/"log/ferry.log"
+            end
+
             test do
               assert_match "usage: ferry", shell_output("#{bin}/ferry help")
             end

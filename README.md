@@ -54,7 +54,7 @@ port = 7811
 handler = "service-proxy"
 ```
 
-Run `ferry daemon` on the dialer under launchd or another supervisor.
+Run `ferry daemon` on the dialer as a service (see below).
 On the far host nothing needs to be started: `ferry peer`, which sshd runs, starts the daemon when it finds none.
 A change to `config.toml` needs a daemon restart, and `ferry reload` re-reads the handler folder only and sends the new list to the other side.
 
@@ -64,31 +64,13 @@ The dialer runs `ssh -T -o BatchMode=yes -o ConnectTimeout=5 <connect> <remote_f
 Set `FERRY_SSH` to use another program than `ssh`.
 When the link drops, the dialer reconnects after 1, 2, 4, 8 and 16 s, then every 30 s.
 
-### launchd on the dialer
+### The daemon as a service on the dialer
 
-Save as `~/Library/LaunchAgents/dev.ferry.daemon.plist` and run `launchctl load` on it:
+On macOS the Homebrew formula carries a launchd service, so `brew services start ferry` runs `ferry daemon` at login and restarts it whenever it exits. The service gets `PATH=$(brew --prefix)/bin:$(brew --prefix)/sbin:/usr/bin:/bin:/usr/sbin:/sbin`, which is what handlers see: a handler that needs another interpreter names it by absolute path. Its output goes to `$(brew --prefix)/var/log/ferry.log`.
 
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>dev.ferry.daemon</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/opt/homebrew/bin/ferry</string>
-        <string>daemon</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardErrorPath</key>
-    <string>/tmp/ferry.err</string>
-</dict>
-</plist>
-```
+`brew upgrade` does not restart a running service, so the old binary keeps running until `brew services restart ferry`. In a Brewfile, `brew "pkarpovich/apps/ferry", restart_service: :changed` makes `brew bundle` restart it after it installs or upgrades the formula. Stop the service with `brew services stop ferry` before `brew uninstall`, or launchd keeps restarting a binary that is gone.
+
+The formula defines no service on Linux: on the far host `ferry peer` starts the daemon.
 
 ## Writing a handler
 
